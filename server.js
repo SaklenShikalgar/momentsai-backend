@@ -3,12 +3,13 @@ import express from "express";
 import cors from "cors";
 import multer from "multer";
 import { v4 as uuidv4 } from "uuid";
-import { S3Client, PutObjectCommand, GetObjectCommand } from "@aws-sdk/client-s3";
+import { S3Client, PutObjectCommand, GetObjectCommand, HeadObjectCommand } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import {
   RekognitionClient,
   IndexFacesCommand,
   SearchFacesByImageCommand,
+  DeleteFacesCommand,
 } from "@aws-sdk/client-rekognition";
 
 const app = express();
@@ -136,9 +137,36 @@ app.post("/api/search-selfie", upload.single("selfie"), async (req, res) => {
       ...new Set(matches.map((m) => `event-photos/${m.Face.ExternalImageId}`)),
     ];
 
-    // Har photo ke liye ek temporary downloadable link (presigned URL) banao, 1 hour ke liye valid
-    const photos = await Promise.all(
+    // Check karo ki photo S3 me abhi bhi hai ya delete ho chuki hai
+    // (auto-delete ke baad Rekognition me chehre reh jate hain, photo nahi)
+    const existence = await Promise.all(
       matchedKeys.map(async (key) => {
+        try {
+          await s3.send(new HeadObjectCommand({ Bucket: BUCKET, Key: key }));
+          return { key, exists: true };
+        } catch (e) {
+          return { key, exists: false };
+        }
+      })
+    );
+
+    const existingKeys = existence.filter((x) => x.exists).map((x) => x.key);
+    const missingKeys = new Set(existence.filter((x) => !x.exists).map((x) => x.key));
+
+    // Jo photos delete ho chuki hain unke chehre bhi collection se saaf kar do
+    const staleFaceIds = matches
+      .filter((m) => missingKeys.has(`event-photos/${m.Face.ExternalImageId}`))
+      .map((m) => m.Face.FaceId);
+
+    if (staleFaceIds.length > 0) {
+      rekognition
+        .send(new DeleteFacesCommand({ CollectionId: COLLECTION_ID, FaceIds: staleFaceIds }))
+        .catch((e) => console.warn("Stale faces delete nahi hue:", e.message));
+    }
+
+    // Bachi hui photos ke liye temporary downloadable link (presigned URL), 1 hour valid
+    const photos = await Promise.all(
+      existingKeys.map(async (key) => {
         const url = await getSignedUrl(
           s3,
           new GetObjectCommand({ Bucket: BUCKET, Key: key }),
