@@ -169,7 +169,12 @@ app.post("/api/search-selfie", upload.single("selfie"), async (req, res) => {
       existingKeys.map(async (key) => {
         const url = await getSignedUrl(
           s3,
-          new GetObjectCommand({ Bucket: BUCKET, Key: key }),
+          new GetObjectCommand({
+            Bucket: BUCKET,
+            Key: key,
+            // attachment = browser photo ko kholne ki jagah seedha download karega
+            ResponseContentDisposition: `attachment; filename="${key.split("/").pop()}"`,
+          }),
           { expiresIn: 3600 }
         ).catch(() => null);
         return { key, url };
